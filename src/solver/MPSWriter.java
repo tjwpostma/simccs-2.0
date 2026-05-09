@@ -10,6 +10,7 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 
@@ -69,8 +70,31 @@ public class MPSWriter {
             vertexCellToIndex.put(graphVertices[i], i);
             vertexIndexToCell.put(i, graphVertices[i]);
         }
+        
+        // Sort edges deterministically to match shapefile indexing
+        ArrayList<Edge> sortedEdges = new ArrayList<>(edgeConstructionCosts.keySet());
+        sortedEdges.sort((e1, e2) -> {
+            int min1 = Math.min(e1.v1, e1.v2);
+            int max1 = Math.max(e1.v1, e1.v2);
+            int min2 = Math.min(e2.v1, e2.v2);
+            int max2 = Math.max(e2.v1, e2.v2);
+            if (min1 != min2) return Integer.compare(min1, min2);
+            return Integer.compare(max1, max2);
+        });
+        
+        // Debug: Print sortedEdges to file
+        try (BufferedWriter debugWriter = new BufferedWriter(new FileWriter("sortedEdges.txt"))) {
+            debugWriter.write("Total edges: " + sortedEdges.size() + "\n");
+            for (int i = 0; i < sortedEdges.size(); i++) {
+                Edge e = sortedEdges.get(i);
+                debugWriter.write(i + "\t" + e.v1 + "\t" + e.v2 + "\n");
+            }
+        } catch (IOException e) {
+            System.out.println("Error writing sortedEdges debug file: " + e.getMessage());
+        }
+        
         int index = 0;
-        for (Edge e : edgeConstructionCosts.keySet()) {
+        for (Edge e : sortedEdges) {
             UnidirEdge e1 = new UnidirEdge(e.v1, e.v2);
             edgeToIndex.put(e1, index);
             edgeIndexToEdge.put(index, e1);
@@ -282,7 +306,7 @@ public class MPSWriter {
 
         String constraint;
 
-        // Set amount of CO2 to capture
+        // Set amount of CO2 to capture (capacity model) or profitability constraint (price model)
         if (modelVersion.equals("c")) {
             constraintCounter = 1;
             constraint = "G" + constraintCounter++;
@@ -294,6 +318,67 @@ public class MPSWriter {
             }
             constraintToSign.put(constraint, "E");
             constraintRHS.put(constraint, modelParamValue);
+        } else if (modelVersion.equals("p")) {
+            // Profitability constraint: revenue >= total costs
+            // modelParamValue * sum(a[i]) >= all costs
+            constraintCounter = 1;
+            constraint = "G" + constraintCounter++;
+            
+            // Revenue side minus capture costs: (carbon price - capture cost) × a[i]
+            for (Source src : sources) {
+                if (!contVariableToConstraints.containsKey(a[sourceCellToIndex.get(src)])) {
+                    contVariableToConstraints.put(a[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
+                }
+                // Combine carbon price and capture cost into single coefficient
+                contVariableToConstraints.get(a[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, modelParamValue - src.getCaptureCost()));
+            }
+            
+            // Cost side: subtract all other costs from revenue
+            for (Source src : sources) {
+                if (!intVariableToConstraints.containsKey(s[sourceCellToIndex.get(src)])) {
+                    intVariableToConstraints.put(s[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
+                }
+                intVariableToConstraints.get(s[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, -src.getOpeningCost(crf)));
+            }
+
+            for (int e = 0; e < edgeToIndex.size(); e++) {
+                for (int c = 0; c < linearComponents.length; c++) {
+                    UnidirEdge unidirEdge = edgeIndexToEdge.get(e);
+                    Edge bidirEdge = new Edge(unidirEdge.v1, unidirEdge.v2);
+
+                    if (!intVariableToConstraints.containsKey(y[e][c])) {
+                        intVariableToConstraints.put(y[e][c], new HashSet<ConstraintTerm>());
+                    }
+                    double coefficient = (linearComponents[c].getConIntercept() * edgeConstructionCosts.get(bidirEdge) + linearComponents[c].getRowIntercept() * edgeRightOfWayCosts.get(bidirEdge)) * crf;
+                    intVariableToConstraints.get(y[e][c]).add(new ConstraintTerm(constraint, -coefficient));
+
+                    if (!contVariableToConstraints.containsKey(p[e][c])) {
+                        contVariableToConstraints.put(p[e][c], new HashSet<ConstraintTerm>());
+                    }
+                    coefficient = (linearComponents[c].getConSlope() * edgeConstructionCosts.get(bidirEdge) + linearComponents[c].getRowSlope() * edgeRightOfWayCosts.get(bidirEdge)) * crf / pipeUtilization;
+                    contVariableToConstraints.get(p[e][c]).add(new ConstraintTerm(constraint, -coefficient));
+                }
+            }
+
+            for (Sink snk : sinks) {
+                if (!intVariableToConstraints.containsKey(r[sinkCellToIndex.get(snk)])) {
+                    intVariableToConstraints.put(r[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
+                }
+                intVariableToConstraints.get(r[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, -snk.getOpeningCost(crf)));
+
+                if (!intVariableToConstraints.containsKey(w[sinkCellToIndex.get(snk)])) {
+                    intVariableToConstraints.put(w[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
+                }
+                intVariableToConstraints.get(w[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, -snk.getWellOpeningCost(crf)));
+
+                if (!contVariableToConstraints.containsKey(b[sinkCellToIndex.get(snk)])) {
+                    contVariableToConstraints.put(b[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
+                }
+                contVariableToConstraints.get(b[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, -snk.getInjectionCost()));
+            }
+            
+            constraintToSign.put(constraint, "G");
+            constraintRHS.put(constraint, 0.0);
         }
 
         // Hardcode constants.
@@ -318,59 +403,69 @@ public class MPSWriter {
 
         // Make objective
         constraint = "OBJ";
-        for (Source src : sources) {
-            if (!intVariableToConstraints.containsKey(s[sourceCellToIndex.get(src)])) {
-                intVariableToConstraints.put(s[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
-            }
-            intVariableToConstraints.get(s[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, src.getOpeningCost(crf)));
+        
+        if (modelVersion.equals("c")) {
+            // Capacity model: minimize total costs
+            for (Source src : sources) {
+                if (!intVariableToConstraints.containsKey(s[sourceCellToIndex.get(src)])) {
+                    intVariableToConstraints.put(s[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
+                }
+                intVariableToConstraints.get(s[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, src.getOpeningCost(crf)));
 
-            if (!contVariableToConstraints.containsKey(a[sourceCellToIndex.get(src)])) {
-                contVariableToConstraints.put(a[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
-            }
-            if (modelVersion.equals("p")) {
-                contVariableToConstraints.get(a[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, (src.getCaptureCost() + modelParamValue)));
-            } else {
+                if (!contVariableToConstraints.containsKey(a[sourceCellToIndex.get(src)])) {
+                    contVariableToConstraints.put(a[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
+                }
                 contVariableToConstraints.get(a[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, src.getCaptureCost()));
             }
-        }
 
-        for (int e = 0; e < edgeToIndex.size(); e++) {
-            for (int c = 0; c < linearComponents.length; c++) {
-                UnidirEdge unidirEdge = edgeIndexToEdge.get(e);
-                Edge bidirEdge = new Edge(unidirEdge.v1, unidirEdge.v2);
+            for (int e = 0; e < edgeToIndex.size(); e++) {
+                for (int c = 0; c < linearComponents.length; c++) {
+                    UnidirEdge unidirEdge = edgeIndexToEdge.get(e);
+                    Edge bidirEdge = new Edge(unidirEdge.v1, unidirEdge.v2);
 
-                if (!intVariableToConstraints.containsKey(y[e][c])) {
-                    intVariableToConstraints.put(y[e][c], new HashSet<ConstraintTerm>());
+                    if (!intVariableToConstraints.containsKey(y[e][c])) {
+                        intVariableToConstraints.put(y[e][c], new HashSet<ConstraintTerm>());
+                    }
+                    double coefficient = (linearComponents[c].getConIntercept() * edgeConstructionCosts.get(bidirEdge) + linearComponents[c].getRowIntercept() * edgeRightOfWayCosts.get(bidirEdge)) * crf;
+                    intVariableToConstraints.get(y[e][c]).add(new ConstraintTerm(constraint, coefficient));
+
+                    if (!contVariableToConstraints.containsKey(p[e][c])) {
+                        contVariableToConstraints.put(p[e][c], new HashSet<ConstraintTerm>());
+                    }
+                    coefficient = (linearComponents[c].getConSlope() * edgeConstructionCosts.get(bidirEdge) + linearComponents[c].getRowSlope() * edgeRightOfWayCosts.get(bidirEdge)) * crf / pipeUtilization;
+                    contVariableToConstraints.get(p[e][c]).add(new ConstraintTerm(constraint, coefficient));
                 }
-                double coefficient = (linearComponents[c].getConIntercept() * edgeConstructionCosts.get(bidirEdge) + linearComponents[c].getRowIntercept() * edgeRightOfWayCosts.get(bidirEdge)) * crf;
-                intVariableToConstraints.get(y[e][c]).add(new ConstraintTerm(constraint, coefficient));
+            }
 
-                if (!contVariableToConstraints.containsKey(p[e][c])) {
-                    contVariableToConstraints.put(p[e][c], new HashSet<ConstraintTerm>());
+            for (Sink snk : sinks) {
+                if (!intVariableToConstraints.containsKey(r[sinkCellToIndex.get(snk)])) {
+                    intVariableToConstraints.put(r[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
                 }
-                coefficient = (linearComponents[c].getConSlope() * edgeConstructionCosts.get(bidirEdge) + linearComponents[c].getRowSlope() * edgeRightOfWayCosts.get(bidirEdge)) * crf / pipeUtilization;
-                contVariableToConstraints.get(p[e][c]).add(new ConstraintTerm(constraint, coefficient));
+                intVariableToConstraints.get(r[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, snk.getOpeningCost(crf)));
+
+                if (!intVariableToConstraints.containsKey(w[sinkCellToIndex.get(snk)])) {
+                    intVariableToConstraints.put(w[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
+                }
+                intVariableToConstraints.get(w[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, snk.getWellOpeningCost(crf)));
+
+                if (!contVariableToConstraints.containsKey(b[sinkCellToIndex.get(snk)])) {
+                    contVariableToConstraints.put(b[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
+                }
+                contVariableToConstraints.get(b[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, snk.getInjectionCost()));
             }
+            
+            constraintToSign.put(constraint, "N");
+        } else if (modelVersion.equals("p")) {
+            // Price model: maximize total captured CO2
+            for (Source src : sources) {
+                if (!contVariableToConstraints.containsKey(a[sourceCellToIndex.get(src)])) {
+                    contVariableToConstraints.put(a[sourceCellToIndex.get(src)], new HashSet<ConstraintTerm>());
+                }
+                contVariableToConstraints.get(a[sourceCellToIndex.get(src)]).add(new ConstraintTerm(constraint, -1.0));
+            }
+            
+            constraintToSign.put(constraint, "N");
         }
-
-        for (Sink snk : sinks) {
-            if (!intVariableToConstraints.containsKey(r[sinkCellToIndex.get(snk)])) {
-                intVariableToConstraints.put(r[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
-            }
-            intVariableToConstraints.get(r[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, snk.getOpeningCost(crf)));
-
-            if (!intVariableToConstraints.containsKey(w[sinkCellToIndex.get(snk)])) {
-                intVariableToConstraints.put(w[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
-            }
-            intVariableToConstraints.get(w[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, snk.getWellOpeningCost(crf)));
-
-            if (!contVariableToConstraints.containsKey(b[sinkCellToIndex.get(snk)])) {
-                contVariableToConstraints.put(b[sinkCellToIndex.get(snk)], new HashSet<ConstraintTerm>());
-            }
-            contVariableToConstraints.get(b[sinkCellToIndex.get(snk)]).add(new ConstraintTerm(constraint, snk.getInjectionCost()));
-        }
-
-        constraintToSign.put(constraint, "N");
 
         String fileName = "";
         if (modelVersion.equals("c")) {

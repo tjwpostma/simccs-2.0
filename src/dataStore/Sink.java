@@ -91,9 +91,25 @@ public class Sink {
     public double getOpeningCost(double crf) {
         return crf * openingCost + omCost;
     }
+
+    public double getFixedCapCost() {
+        return openingCost;
+    }
+
+    public double getOMCost() {
+        return omCost;
+    }
     
     public double getWellOpeningCost(double crf) {
         return crf * wellOpeningCost + wellOMCost;
+    }
+    
+    public double getWellFixedCapCost() {
+        return wellOpeningCost;
+    }
+    
+    public double getWellOMCost() {
+        return wellOMCost;
     }
     
     public double getInjectionCost() {

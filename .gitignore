@@ -1,0 +1,55 @@
+# ─── macOS ───────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+/*.py
+
+# ─── Java build artifacts ────────────────────────────────────────────────────
+bin/
+*.class
+*.jar
+# Keep dependency and pre-built release jars tracked
+!ext/*.jar
+!store/*.jar
+
+# ─── Datasets (large geospatial cost networks — not for version control) ─────
+# All datasets contain multi-GB cost network files; store separately (e.g. Git LFS or shared drive)
+Datasets/
+
+# ─── Python scripts for arcGIS Pro visualization (not for version control) ─────────────────────────
+arcpro_visualization/
+
+# ─── Solver output files ─────────────────────────────────────────────────────
+*.sol
+*.mps
+*.lp
+cplex.log
+*.log
+
+# ─── IDE / editor local settings ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+
+# ─── Agent / AI assistant local config ───────────────────────────────────────
+.claude/
+.github/
+
+# ─── Old / scratch work ──────────────────────────────────────────────────────
+old/
+
+# ─── Misc generated files ────────────────────────────────────────────────────
+sortedEdges.txt

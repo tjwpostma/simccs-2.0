@@ -10,6 +10,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.PriorityQueue;
+import java.util.Set;
 import javafx.scene.control.TextArea;
 import static utilities.Utilities.*;
 
@@ -81,12 +82,27 @@ public class Solver {
             }
             messenger.setText(message);
         } else {
+            // Check for co-located source/sink pairs
+            HashMap<Integer, ArrayList<String>> colocated = data.getColocatedEntities();
+            if (!colocated.isEmpty()) {
+                String message = "Note: " + colocated.size() + " cell(s) have co-located sources/sinks.\n";
+                message += "CO2 can transfer directly at zero cost at these locations:\n";
+                for (Integer cell : colocated.keySet()) {
+                    message += "  Cell " + cell + ": " + String.join(", ", colocated.get(cell)) + "\n";
+                }
+                messenger.setText(message);
+            }
+            
             for (int nodeNum = 0; nodeNum < sourcesAndSinks.length - 1; nodeNum++) {
                 int[] destinations = new int[sourcesAndSinks.length - nodeNum - 1];
                 System.arraycopy(sourcesAndSinks, nodeNum + 1, destinations, 0, destinations.length);
                 Object[] sourcePathsAndCosts = dijkstra(sourcesAndSinks[nodeNum], destinations, .9999999);
-                allPathsList.addAll((ArrayList<int[]>) sourcePathsAndCosts[0]);
-                allPathCostsList.addAll((ArrayList<Double>) sourcePathsAndCosts[1]);
+                @SuppressWarnings("unchecked")
+                ArrayList<int[]> paths = (ArrayList<int[]>) sourcePathsAndCosts[0];
+                @SuppressWarnings("unchecked")
+                ArrayList<Double> costs = (ArrayList<Double>) sourcePathsAndCosts[1];
+                allPathsList.addAll(paths);
+                allPathCostsList.addAll(costs);
             }
             int[][] allPaths = allPathsList.toArray(new int[0][0]);
             double[] allPathCosts = convertDoubleArray(allPathCostsList.toArray(new Double[0]));
@@ -112,9 +128,26 @@ public class Solver {
         HashSet<Integer> degree2Vertices = new HashSet<>(); // Non-source/sink vertices with degree 2
 
         // Populate initial costs, routes, and neighbors
+        int selfLoopCount = 0;
+        int unreachableCount = 0;
         for (Edge pair : delaunayPairs) {
+            // Skip self-loop edges that occur when sources/sinks are co-located.
+            // Flow balance in the MPS model handles direct CO2 transfer at co-located cells.
+            if (pair.isSelfLoop()) {
+                selfLoopCount++;
+                continue;
+            }
+            
             int pair2List[] = {pair.v2};
+            @SuppressWarnings("unchecked")
             int[] path = ((ArrayList<int[]>) (dijkstra(pair.v1, pair2List, .9999999)[0])).get(0);
+
+            // Skip unreachable pairs (empty path means no route exists through cost surface)
+            if (path.length == 0) {
+                unreachableCount++;
+                System.out.println("WARNING: No path found between cells " + pair.v1 + " and " + pair.v2);
+                continue;
+            }
 
             for (int i = 0; i < path.length - 1; i++) {
                 Edge e = new Edge(path[i], path[i + 1]);
@@ -131,6 +164,13 @@ public class Solver {
                 }
                 vertexNeighbors.get(path[i + 1]).add(path[i]);
             }
+        }
+        
+        if (selfLoopCount > 0) {
+            System.out.println("Skipped " + selfLoopCount + " self-loop edge(s) from co-located source/sink pairs.");
+        }
+        if (unreachableCount > 0) {
+            System.out.println("WARNING: Skipped " + unreachableCount + " unreachable Delaunay edge(s) where no path exists through cost surface.");
         }
 
         // Populate vertex lists
@@ -211,6 +251,56 @@ public class Solver {
                 }
             }
         }
+        
+        // Detect and repair isolated vertices (especially important for co-located source/sink pairs)
+        HashSet<Integer> isolatedCells = new HashSet<>();
+        for (int cell : sourceSinksList) {
+            if (!vertexNeighbors.containsKey(cell) || vertexNeighbors.get(cell).isEmpty()) {
+                isolatedCells.add(cell);
+            }
+        }
+        
+        if (!isolatedCells.isEmpty()) {
+            System.out.println("Detected " + isolatedCells.size() + " isolated source/sink cell(s). Connecting to nearest neighbors...");
+            HashMap<Integer, ArrayList<String>> colocated = data.getColocatedEntities();
+            
+            for (int isolatedCell : isolatedCells) {
+                // Find K nearest neighbors from existing graph vertices
+                int K = 3;
+                ArrayList<Integer> nearestNeighbors = findKNearestCells(isolatedCell, vertexNeighbors.keySet(), K);
+                
+                if (colocated.containsKey(isolatedCell)) {
+                    System.out.println("  Cell " + isolatedCell + " has co-located entities: " + String.join(", ", colocated.get(isolatedCell)));
+                }
+                
+                // Connect to nearest neighbors via Dijkstra
+                for (int nearestCell : nearestNeighbors) {
+                    int[] destList = {nearestCell};
+                    @SuppressWarnings("unchecked")
+                    int[] path = ((ArrayList<int[]>) (dijkstra(isolatedCell, destList, .9999999)[0])).get(0);
+                    
+                    // Add edges from this path to the graph
+                    for (int i = 0; i < path.length - 1; i++) {
+                        Edge e = new Edge(path[i], path[i + 1]);
+                        if (!graphEdgeCosts.containsKey(e)) {
+                            graphEdgeCosts.put(e, data.getEdgeWeight(path[i], path[i + 1], "c"));
+                            graphEdgeRoutes.put(e, new int[]{path[i], path[i + 1]});
+                            
+                            // Update neighbors
+                            if (!vertexNeighbors.containsKey(path[i])) {
+                                vertexNeighbors.put(path[i], new HashSet<>());
+                            }
+                            vertexNeighbors.get(path[i]).add(path[i + 1]);
+                            if (!vertexNeighbors.containsKey(path[i + 1])) {
+                                vertexNeighbors.put(path[i + 1], new HashSet<>());
+                            }
+                            vertexNeighbors.get(path[i + 1]).add(path[i]);
+                        }
+                    }
+                }
+            }
+        }
+        
         int[] vertices = new int[vertexNeighbors.keySet().size()];
         int i = 0;
         for (int vertex : vertexNeighbors.keySet()) {
@@ -219,6 +309,45 @@ public class Solver {
         Arrays.sort(vertices);
         return new Object[]{vertices, graphEdgeCosts, graphEdgeRoutes};
 
+    }
+    
+    /**
+     * Find K nearest cells to the target cell from a set of candidate cells.
+     * Uses Euclidean distance based on cell coordinates.
+     */
+    private ArrayList<Integer> findKNearestCells(int targetCell, Set<Integer> candidateCells, int K) {
+        double[] targetXY = data.cellLocationToRawXY(targetCell);
+        
+        // Calculate distances to all candidates
+        ArrayList<CellDistance> distances = new ArrayList<>();
+        for (int candidate : candidateCells) {
+            if (candidate != targetCell) {
+                double[] candidateXY = data.cellLocationToRawXY(candidate);
+                double dx = targetXY[0] - candidateXY[0];
+                double dy = targetXY[1] - candidateXY[1];
+                double distance = Math.sqrt(dx * dx + dy * dy);
+                distances.add(new CellDistance(candidate, distance));
+            }
+        }
+        
+        // Sort by distance and take K nearest
+        distances.sort((a, b) -> Double.compare(a.distance, b.distance));
+        ArrayList<Integer> nearest = new ArrayList<>();
+        for (int i = 0; i < Math.min(K, distances.size()); i++) {
+            nearest.add(distances.get(i).cell);
+        }
+        
+        return nearest;
+    }
+    
+    private class CellDistance {
+        int cell;
+        double distance;
+        
+        CellDistance(int cell, double distance) {
+            this.cell = cell;
+            this.distance = distance;
+        }
     }
 
     public Object[] makeComponentCosts() {
@@ -319,23 +448,30 @@ public class Solver {
         ArrayList<int[]> paths = new ArrayList<>();
         ArrayList<Double> pathCosts = new ArrayList<>();
         for (int dest : destinations) {
-            ArrayList<Integer> pathList = new ArrayList<>();
-            int node = dest;
-            while (node != src) {
+            // Check if destination was reached (previous[dest] != -1 or dest == src)
+            if (dest == src || previous[dest] != -1) {
+                ArrayList<Integer> pathList = new ArrayList<>();
+                int node = dest;
+                while (node != src) {
+                    pathList.add(0, node);
+                    node = previous[node];
+                }
                 pathList.add(0, node);
-                node = previous[node];
-            }
-            pathList.add(0, node);
 
-            // Modify edge costs and recalculate real cost
-            double cost = 0;
-            for (int i = 0; i < pathList.size() - 1; i++) {
-                cost += data.getEdgeWeight(pathList.get(i), pathList.get(i + 1), "c");
-                data.updateModifiedEdgeRoutingCost(pathList.get(i), pathList.get(i + 1), edgeCostModification);
-                data.updateModifiedEdgeRoutingCost(pathList.get(i + 1), pathList.get(i), edgeCostModification);
+                // Modify edge costs and recalculate real cost
+                double cost = 0;
+                for (int i = 0; i < pathList.size() - 1; i++) {
+                    cost += data.getEdgeWeight(pathList.get(i), pathList.get(i + 1), "c");
+                    data.updateModifiedEdgeRoutingCost(pathList.get(i), pathList.get(i + 1), edgeCostModification);
+                    data.updateModifiedEdgeRoutingCost(pathList.get(i + 1), pathList.get(i), edgeCostModification);
+                }
+                pathCosts.add(cost);
+                paths.add(convertIntegerArray(pathList.toArray(new Integer[0])));
+            } else {
+                // Destination unreachable - add empty path with max cost
+                paths.add(new int[]{});
+                pathCosts.add(Double.MAX_VALUE);
             }
-            pathCosts.add(cost);
-            paths.add(convertIntegerArray(pathList.toArray(new Integer[0])));
         }
         return new Object[]{paths, pathCosts};
     }
@@ -369,8 +505,8 @@ public class Solver {
             return cellNum;
         }
 
-        public boolean equals(Data other) {
-            return distance == other.distance;
-        }
+        // public boolean equals(Data other) {
+        //     return distance == other.distance;
+        // }
     }
 }

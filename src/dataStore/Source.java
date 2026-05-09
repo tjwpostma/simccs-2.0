@@ -65,6 +65,14 @@ public class Source {
     public double getOpeningCost(double crf) {
         return crf * openingCost + omCost;
     }
+
+    public double getFixedCapCost() {
+        return openingCost;
+    }
+
+    public double getOMCost() {
+        return omCost;
+    }
     
     public double getCaptureCost() {
         return captureCost;

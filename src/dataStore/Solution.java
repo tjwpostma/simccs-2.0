@@ -193,6 +193,10 @@ public class Solution {
         return edgeCosts;
     }
 
+    public HashMap<Sink, Integer> getSinkNumWells() {
+        return sinkNumWells;
+    }
+
     public int getNumOpenedSources() {
         return sourceCaptureAmounts.keySet().size();
     }

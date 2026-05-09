@@ -1,6 +1,6 @@
 package dataStore;
 
-import java.io.File;
+// import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -53,6 +53,9 @@ public class DataStorer {
     private double[] priceConfiguration;
 
     private HashMap<Edge, ArrayList<Edge>> sourceSinkRoutes;
+    
+    // Co-location tracking
+    private HashMap<Integer, ArrayList<String>> colocatedEntities;  // Cell -> list of entity labels at that cell
 
     public DataStorer(String basePath, String dataset, String scenario) {
         this.basePath = basePath;
@@ -84,6 +87,7 @@ public class DataStorer {
         dataInOut.saveDelaunayPairs();
     }
 
+    @SuppressWarnings("unchecked")
     public void generateCandidateGraph() {
         loadNetworkCosts();
         String[] outliers = outliers();
@@ -149,6 +153,7 @@ public class DataStorer {
         return outliers.toArray(new String[outliers.size()]);
     }
 
+    @SuppressWarnings("unchecked")
     public void loadNetworkCosts() {
         if (constructionCosts == null) {
             dataInOut.loadCosts();
@@ -290,6 +295,34 @@ public class DataStorer {
         // NOTE: Cell counting starts at 1, not 0.
         int y = height - ((int) ((lat - lowerLeftY) / cellSize) + 1) + 1;
         int x = (int) ((lon - lowerLeftX) / cellSize) + 1;
+        
+        // Validate and clamp coordinates to grid bounds
+        boolean outOfBounds = false;
+        if (x < 1) {
+            System.out.println("WARNING: Longitude " + lon + " is outside grid bounds (west). Clamping to grid edge.");
+            x = 1;
+            outOfBounds = true;
+        } else if (x > width) {
+            System.out.println("WARNING: Longitude " + lon + " is outside grid bounds (east). Clamping to grid edge.");
+            x = width;
+            outOfBounds = true;
+        }
+        
+        if (y < 1) {
+            System.out.println("WARNING: Latitude " + lat + " is outside grid bounds (north). Clamping to grid edge.");
+            y = 1;
+            outOfBounds = true;
+        } else if (y > height) {
+            System.out.println("WARNING: Latitude " + lat + " is outside grid bounds (south). Clamping to grid edge.");
+            y = height;
+            outOfBounds = true;
+        }
+        
+        if (outOfBounds) {
+            System.out.println("  Grid bounds: X=[" + lowerLeftX + ", " + (lowerLeftX + width * cellSize) + 
+                             "], Y=[" + lowerLeftY + ", " + (lowerLeftY + height * cellSize) + "]");
+        }
+        
         return xyToVectorized(x, y);
     }
 
@@ -391,6 +424,54 @@ public class DataStorer {
         return -1;
     }
 
+    /**
+     * Identify cells where multiple sources and/or sinks are co-located.
+     * Returns a map of cell number -> list of entity labels (e.g., "Source: PowerPlant1", "Sink: Reservoir2")
+     * Only includes cells with 2+ entities.
+     */
+    public HashMap<Integer, ArrayList<String>> identifyColocatedSourcesSinks() {
+        if (colocatedEntities != null) {
+            return colocatedEntities;
+        }
+        
+        HashMap<Integer, ArrayList<String>> cellEntities = new HashMap<>();
+        
+        // Collect all sources by cell
+        for (Source source : sources) {
+            int cell = source.getCellNum();
+            if (!cellEntities.containsKey(cell)) {
+                cellEntities.put(cell, new ArrayList<>());
+            }
+            cellEntities.get(cell).add("Source: " + source.getLabel());
+        }
+        
+        // Collect all sinks by cell
+        for (Sink sink : sinks) {
+            int cell = sink.getCellNum();
+            if (!cellEntities.containsKey(cell)) {
+                cellEntities.put(cell, new ArrayList<>());
+            }
+            cellEntities.get(cell).add("Sink: " + sink.getLabel());
+        }
+        
+        // Filter to only cells with multiple entities
+        colocatedEntities = new HashMap<>();
+        for (Integer cell : cellEntities.keySet()) {
+            if (cellEntities.get(cell).size() > 1) {
+                colocatedEntities.put(cell, cellEntities.get(cell));
+            }
+        }
+        
+        return colocatedEntities;
+    }
+    
+    public HashMap<Integer, ArrayList<String>> getColocatedEntities() {
+        if (colocatedEntities == null) {
+            identifyColocatedSourcesSinks();
+        }
+        return colocatedEntities;
+    }
+    
     public boolean isSimplified() {
         for (Source src : sources) {
             if (!src.isSimplified()) {

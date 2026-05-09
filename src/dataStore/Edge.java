@@ -34,6 +34,10 @@ public class Edge {
         return (v1 == other.v1 && v2 == other.v2) || (v1 == other.v2 && v2 == other.v1);
     }
     
+    public boolean isSelfLoop() {
+        return v1 == v2;
+    }
+    
     public String toString() {
         return v1 + " <-> " + v2;
     }

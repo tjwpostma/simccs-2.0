@@ -2,7 +2,7 @@ package gui;
 
 import java.io.File;
 import javafx.application.Application;
-import static javafx.application.Application.launch;
+// import static javafx.application.Application.launch;
 import javafx.beans.value.ChangeListener;
 import javafx.beans.value.ObservableValue;
 import javafx.collections.ObservableList;
@@ -20,7 +20,7 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TitledPane;
 import javafx.scene.control.ToggleGroup;
-import javafx.scene.input.KeyEvent;
+// import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.AnchorPane;
@@ -37,7 +37,7 @@ import javafx.stage.Stage;
 public class Gui extends Application {
 
     private NetworkDisplay displayPane;
-    private ChoiceBox scenarioChoice;
+    private ChoiceBox<String> scenarioChoice;
     private RadioButton dispDelaunayEdges;
     private RadioButton dispCandidateNetwork;
     private RadioButton sourceLabeled;
@@ -45,7 +45,7 @@ public class Gui extends Application {
     private RadioButton sinkLabeled;
     private RadioButton sinkVisible;
     private RadioButton dispCostSurface;
-    private ChoiceBox runChoice;
+    private ChoiceBox<String> runChoice;
     private AnchorPane solutionPane;
     private TextArea messenger;
 
@@ -144,7 +144,7 @@ public class Gui extends Application {
 
         // Populate data pane.
         // Build scenario selection control and add to control pane.
-        scenarioChoice = new ChoiceBox();
+        scenarioChoice = new ChoiceBox<String>();
         scenarioChoice.setPrefSize(150, 27);
         TitledPane scenarioContainer = new TitledPane("Scenario", scenarioChoice);
         scenarioContainer.setCollapsible(false);
@@ -152,7 +152,7 @@ public class Gui extends Application {
         scenarioContainer.setLayoutX(14);
         scenarioContainer.setLayoutY(73);
         dataPane.getChildren().add(scenarioContainer);
-        runChoice = new ChoiceBox();
+        runChoice = new ChoiceBox<String>();
         scenarioChoice.getSelectionModel().selectedItemProperty().addListener(new ChangeListener<String>() {
             @Override
             public void changed(ObservableValue<? extends String> selected, String oldScenario, String newScenario) {

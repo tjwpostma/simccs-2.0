@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="SimCCS" default="jar" basedir=".">
+    <description>
+        Build file for SimCCS - Carbon Capture and Storage Optimization System
+    </description>
+
+    <!-- Properties -->
+    <property name="src.dir" value="src"/>
+    <property name="bin.dir" value="bin"/>
+    <property name="ext.dir" value="ext"/>
+    <property name="jar.file" value="store/SimCCS_v2.jar"/>
+    <property name="java.version" value="21"/>
+    
+    <!-- JavaFX module path (Zulu 25 JDK includes JavaFX) -->
+    <property name="javafx.modules" value="/Library/Java/JavaVirtualMachines/zulu-25.jdk/Contents/Home/jmods"/>
+
+    <!-- Classpath for external libraries (OpenMap, etc.) -->
+    <path id="project.classpath">
+        <fileset dir="${ext.dir}" includes="*.jar"/>
+    </path>
+
+    <!-- Clean target -->
+    <target name="clean" description="Remove build artifacts">
+        <delete dir="${bin.dir}"/>
+        <delete file="${jar.file}"/>
+        <echo message="Clean complete"/>
+    </target>
+
+    <!-- Compile target -->
+    <target name="compile" description="Compile all source files">
+        <mkdir dir="${bin.dir}"/>
+        <javac srcdir="${src.dir}"
+               destdir="${bin.dir}"
+               classpathref="project.classpath"
+               modulepath="${javafx.modules}"
+               source="21"
+               target="21"
+               includeantruntime="false"
+               debug="true"
+               verbose="false">
+            <include name="**/*.java"/>
+            <compilerarg value="--add-modules"/>
+            <compilerarg value="javafx.controls,javafx.fxml,javafx.swing"/>
+            <compilerarg value="-Xlint:none"/>
+        </javac>
+        <echo message="Compilation complete"/>
+    </target>
+
+    <!-- JAR target -->
+    <target name="jar" depends="compile" description="Create JAR file">
+        <manifestclasspath property="manifest.classpath" jarfile="${jar.file}">
+            <classpath refid="project.classpath"/>
+        </manifestclasspath>
+        
+        <jar destfile="${jar.file}"
+             basedir="${bin.dir}">
+            <manifest>
+                <attribute name="Main-Class" value="gui.Gui"/>
+                <attribute name="Class-Path" value="${manifest.classpath}"/>
+                <attribute name="Implementation-Title" value="SimCCS"/>
+                <attribute name="Implementation-Version" value="2.0"/>
+            </manifest>
+        </jar>
+        <echo message="JAR created: ${jar.file}"/>
+    </target>
+
+    <!-- Run target -->
+    <target name="run" depends="jar" description="Run the application">
+        <java jar="${jar.file}" fork="true"/>
+    </target>
+
+    <!-- Help target -->
+    <target name="help" description="Show available targets">
+        <echo>
+SimCCS Build Targets:
+  ant clean       - Remove build artifacts
+  ant compile     - Compile source files
+  ant jar         - Create JAR file (default)
+  ant clean jar   - Clean and rebuild JAR
+  ant run         - Build and run application
+  ant help        - Show this message
+
+Usage:
+  To build:     ant clean jar
+  To run:       ant run
+  OR manually:  java -jar SimCCS_v2.jar
+        </echo>
+    </target>
+
+</project>

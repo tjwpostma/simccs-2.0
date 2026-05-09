@@ -18,12 +18,13 @@ import com.bbn.openmap.dataAccess.shape.EsriShapeExport;
 import com.bbn.openmap.dataAccess.shape.DbfTableModel;
 import com.bbn.openmap.dataAccess.shape.EsriPoint;
 import com.bbn.openmap.dataAccess.shape.EsriPointList;
-import java.io.DataOutputStream;
+// import java.io.DataOutputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,6 +58,16 @@ public class DataInOut {
         loadSources();
         System.out.println("Loading Sink Data...");
         loadSinks();
+        
+        // Detect co-located sources and sinks
+        HashMap<Integer, ArrayList<String>> colocated = data.identifyColocatedSourcesSinks();
+        if (!colocated.isEmpty()) {
+            System.out.println("Detected " + colocated.size() + " cell(s) with co-located sources and/or sinks:");
+            for (Integer cell : colocated.keySet()) {
+                System.out.println("  Cell " + cell + ": " + String.join(", ", colocated.get(cell)));
+            }
+        }
+        
         System.out.println("Loading Transport Data...");
         loadTransport();
         System.out.print("Loading Delaunay Pairs...");
@@ -744,8 +755,18 @@ public class DataInOut {
             vertexCellToIndex.put(graphVertices[i], i);
             vertexIndexToCell.put(i, graphVertices[i]);
         }
+        // Sort edges deterministically to match shapefile and MPS indexing
+        ArrayList<Edge> sortedEdges = new ArrayList<>(edgeConstructionCosts.keySet());
+        sortedEdges.sort((e1, e2) -> {
+            int min1 = Math.min(e1.v1, e1.v2);
+            int max1 = Math.max(e1.v1, e1.v2);
+            int min2 = Math.min(e2.v1, e2.v2);
+            int max2 = Math.max(e2.v1, e2.v2);
+            if (min1 != min2) return Integer.compare(min1, min2);
+            return Integer.compare(max1, max2);
+        });
         int index = 0;
-        for (Edge e : edgeConstructionCosts.keySet()) {
+        for (Edge e : sortedEdges) {
             UnidirEdge e1 = new UnidirEdge(e.v1, e.v2);
             edgeToIndex.put(e1, index);
             edgeIndexToEdge.put(index, e1);
@@ -856,17 +877,29 @@ public class DataInOut {
         HashMap<Edge, int[]> graphEdgeRoutes = data.getGraphEdgeRoutes();
         HashMap<Edge, Double> graphEdgeLengths = data.getGraphEdgeLengths();
 
+        // Create index maps for sources and sinks to preserve CSV load order
+        HashMap<Source, Integer> sourceIndex = new HashMap<>();
+        for (int i = 0; i < sources.length; i++) {
+            sourceIndex.put(sources[i], i);
+        }
+        HashMap<Sink, Integer> sinkIndex = new HashMap<>();
+        for (int i = 0; i < sinks.length; i++) {
+            sinkIndex.put(sinks[i], i);
+        }
+
         // Make source shapefiles.
         EsriPointList sourceList = new EsriPointList();
-        String[] sourceAttributeNames = {"Id", "X", "Y", "CO2Cptrd", "MxSpply", "PieWdge", "GensUsed", "MaxGens", "ActlCst", "TtlCst", "Name", "Cell#"};
-        int[] sourceAttributeDecimals = {0, 6, 6, 6, 6, 6, 0, 0, 0, 0, 0, 0};
-        DbfTableModel sourceAttributeTable = new DbfTableModel(sourceAttributeNames.length);   //12
+        String[] sourceAttributeNames = {"Id", "Idx", "X", "Y", "Capt|Mt/y", "Supp|Mt/y", "Uncap|Mt/y", "GensUsed", "MaxGens", "Total|$M/y", "Levl|$/t", "Name", "Cell#"};
+        int[] sourceAttributeDecimals = {0, 0, 6, 6, 6, 6, 6, 0, 0, 6, 2, 0, 0};
+        DbfTableModel sourceAttributeTable = new DbfTableModel(sourceAttributeNames.length);   //13
         for (int colNum = 0; colNum < sourceAttributeNames.length; colNum++) {
+            sourceAttributeTable.setLength(colNum, 10);
             sourceAttributeTable.setColumnName(colNum, sourceAttributeNames[colNum]);
             sourceAttributeTable.setDecimalCount(colNum, (byte) sourceAttributeDecimals[colNum]);
-            sourceAttributeTable.setLength(colNum, 10);
             if (sourceAttributeNames[colNum].equals("Id")) {
                 sourceAttributeTable.setType(colNum, DbfTableModel.TYPE_CHARACTER);
+            } else if (sourceAttributeDecimals[colNum] == 0) {
+                sourceAttributeTable.setType(colNum, DbfTableModel.TYPE_LONG);
             } else {
                 sourceAttributeTable.setType(colNum, DbfTableModel.TYPE_NUMERIC);
             }
@@ -888,17 +921,21 @@ public class DataInOut {
                     sourceList.add(source);
 
                     // Add attributes.
-                    ArrayList row = new ArrayList();
+                    ArrayList<Object> row = new ArrayList<>();
                     row.add(src.getLabel());
+                    row.add((double) sourceIndex.get(src).intValue());  // Idx: original index from sources.csv
                     row.add(data.cellToLatLon(src.getCellNum())[1]);
                     row.add(data.cellToLatLon(src.getCellNum())[0]);
                     row.add(sourceCaptureAmounts.get(src));
                     row.add(src.getProductionRate());
                     row.add(src.getProductionRate() - sourceCaptureAmounts.get(src));
-
-                    for (int i = 0; i < 6; i++) {
-                        row.add(0);
-                    }
+                    row.add(1.0);  // GensUsed (1 source in use)
+                    row.add(1.0);  // MaxGens (max 1 source)
+                    row.add(soln.getSourceCosts().getOrDefault(src, 0.0));  // TtlCst (total cost $M/yr)
+                    double levelizedCost = sourceCaptureAmounts.get(src) > 0 ? soln.getSourceCosts().getOrDefault(src, 0.0) / sourceCaptureAmounts.get(src) : 0.0;
+                    row.add(levelizedCost);  // LvlzCst (levelized cost $/tCO2)
+                    row.add(src.getLabel());  // Name
+                    row.add((double) src.getCellNum());  // Cell#
                     sourceAttributeTable.addRecord(row);
                 }
             }
@@ -910,15 +947,17 @@ public class DataInOut {
 
         // Make sink shapefiles.
         EsriPointList sinkList = new EsriPointList();
-        String[] sinkAttributeNames = {"Id", "X", "Y", "CO2Strd", "MxStrg", "PieWdge", "WllsUsed", "MxWlls", "ActCst", "TtlCst", "Name", "Cell#"};
-        int[] sinkAttributeDecimals = {0, 6, 6, 6, 6, 6, 0, 0, 0, 0, 0, 0};
+        String[] sinkAttributeNames = {"Id", "Idx", "X", "Y", "Store|Mt/y", "MaxStg|Mt", "Unstor|Mt", "WllsUsed", "MxWlls", "Total|$M/y", "Levl|$/t", "Name", "Cell#"};
+        int[] sinkAttributeDecimals = {0, 0, 6, 6, 6, 6, 6, 0, 0, 6, 2, 0, 0};
         DbfTableModel sinkAttributeTable = new DbfTableModel(sinkAttributeNames.length);   //12
         for (int colNum = 0; colNum < sinkAttributeNames.length; colNum++) {
+            sinkAttributeTable.setLength(colNum, 10);
             sinkAttributeTable.setColumnName(colNum, sinkAttributeNames[colNum]);
             sinkAttributeTable.setDecimalCount(colNum, (byte) sinkAttributeDecimals[colNum]);
-            sinkAttributeTable.setLength(colNum, 10);
-            if (sinkAttributeNames[colNum].equals("Id")) {
+            if (sinkAttributeNames[colNum].equals("Id") || sinkAttributeNames[colNum].equals("Name")) {
                 sinkAttributeTable.setType(colNum, DbfTableModel.TYPE_CHARACTER);
+            } else if (sinkAttributeDecimals[colNum] == 0) {
+                sinkAttributeTable.setType(colNum, DbfTableModel.TYPE_LONG);
             } else {
                 sinkAttributeTable.setType(colNum, DbfTableModel.TYPE_NUMERIC);
             }
@@ -940,22 +979,28 @@ public class DataInOut {
                     sinkList.add(source);
 
                     // Add attributes.
-                    ArrayList row = new ArrayList();
+                    ArrayList<Object> row = new ArrayList<>();
                     row.add(snk.getLabel());
+                    row.add((double) sinkIndex.get(snk).intValue());  // Idx: original index from sinks.csv
                     row.add(data.cellToLatLon(snk.getCellNum())[1]);
                     row.add(data.cellToLatLon(snk.getCellNum())[0]);
                     row.add(sinkStorageAmounts.get(snk));
                     row.add(snk.getCapacity() / soln.getProjectLength());
                     row.add(snk.getCapacity() / soln.getProjectLength() - sinkStorageAmounts.get(snk));
-
-                    for (int i = 0; i < 6; i++) {
-                        row.add(0);
-                    }
+                    row.add(((Number) soln.getSinkNumWells().getOrDefault(snk, 0)).doubleValue());  // WllsUsed
+                    int maxWells = snk.getWellCapacity() > 0 ? (int) Math.ceil(snk.getCapacity() / snk.getWellCapacity()) : 0;  // MxWlls
+                    row.add((double) maxWells);
+                    row.add(soln.getSinkCosts().getOrDefault(snk, 0.0));  // TtlCst (total cost $M/yr)
+                    double sinkLevelizedCost = sinkStorageAmounts.get(snk) > 0 ? soln.getSinkCosts().getOrDefault(snk, 0.0) / sinkStorageAmounts.get(snk) : 0.0;
+                    row.add(sinkLevelizedCost);  // LvlzCst (levelized cost $/tCO2)
+                    row.add(snk.getLabel());  // Name
+                    row.add((double) snk.getCellNum());  // Cell#
 
                     sinkAttributeTable.addRecord(row);
                 }
             }
         }
+
 
         EsriShapeExport writeSinkShapefiles = new EsriShapeExport(sinkList, sinkAttributeTable, newDir.toString() + "/Sinks");
         writeSinkShapefiles.export();
@@ -963,45 +1008,60 @@ public class DataInOut {
 
         // Make network shapefiles.
         EsriPolylineList edgeList = new EsriPolylineList();
-        String[] edgeAttributeNames = {"Id", "CapID", "CapValue", "Flow", "Cost", "LengKM", "LengROW", "LengCONS", "Variable"};
-        int[] edgeAttributeDecimals = {0, 0, 0, 6, 0, 3, 0, 0, 0};
-        DbfTableModel edgeAttributeTable = new DbfTableModel(edgeAttributeNames.length);   //12
+        String[] edgeAttributeNames = {"Id(str)", "Id(num)", "Flow|Mt/y", "Cost|$M/y", "Length|km", "ConCost|-", "Levl|$/t"};
+        int[] edgeAttributeDecimals = {0, 0, 6, 6, 3, 3, 2};
+        DbfTableModel edgeAttributeTable = new DbfTableModel(edgeAttributeNames.length);
         for (int colNum = 0; colNum < edgeAttributeNames.length; colNum++) {
+            edgeAttributeTable.setLength(colNum, 10);
             edgeAttributeTable.setColumnName(colNum, edgeAttributeNames[colNum]);
             edgeAttributeTable.setDecimalCount(colNum, (byte) edgeAttributeDecimals[colNum]);
-            edgeAttributeTable.setLength(colNum, 10);
-            if (edgeAttributeNames[colNum].equals("Id")) {
+            if (edgeAttributeNames[colNum].equals("Id(str)")) {
                 edgeAttributeTable.setType(colNum, DbfTableModel.TYPE_CHARACTER);
+            } else if (edgeAttributeDecimals[colNum] == 0) {
+                edgeAttributeTable.setType(colNum, DbfTableModel.TYPE_LONG);
             } else {
                 edgeAttributeTable.setType(colNum, DbfTableModel.TYPE_NUMERIC);
             }
         }
-        for (Edge edg : soln.getOpenedEdges()) {
-            // Build route
-            int[] route = graphEdgeRoutes.get(edg);
-            double[] routeLatLon = new double[route.length * 2];    // Route cells translated into: lat, lon, lat, lon,...
-            for (int i = 0; i < route.length; i++) {
-                int cell = route[i];
-                routeLatLon[i * 2] = data.cellToLatLon(cell)[0];
-                routeLatLon[i * 2 + 1] = data.cellToLatLon(cell)[1];
-            }
+        // Sort edges deterministically for consistent ID assignment across runs
+        ArrayList<Edge> sortedEdges = new ArrayList<>(graphEdgeRoutes.keySet());
+        sortedEdges.sort((e1, e2) -> {
+            int min1 = Math.min(e1.v1, e1.v2);
+            int max1 = Math.max(e1.v1, e1.v2);
+            int min2 = Math.min(e2.v1, e2.v2);
+            int max2 = Math.max(e2.v1, e2.v2);
+            if (min1 != min2) return Integer.compare(min1, min2);
+            return Integer.compare(max1, max2);
+        });
 
-            EsriPolyline edge = new EsriPolyline(routeLatLon, OMGraphic.DECIMAL_DEGREES, OMGraphic.LINETYPE_STRAIGHT);
-            edgeList.add(edge);
+        int arcId = 0;
+        for (Edge edg : sortedEdges) {
+            if (soln.getOpenedEdges().contains(edg)) {
+                // Build route
+                int[] route = graphEdgeRoutes.get(edg);
+                double[] routeLatLon = new double[route.length * 2];    // Route cells translated into: lat, lon, lat, lon,...
+                for (int i = 0; i < route.length; i++) {
+                    int cell = route[i];
+                    routeLatLon[i * 2] = data.cellToLatLon(cell)[0];
+                    routeLatLon[i * 2 + 1] = data.cellToLatLon(cell)[1];
+                }
 
-            // Add attributes.
-            ArrayList row = new ArrayList();
-            for (int i = 0; i < 3; i++) {
-                row.add(0);
-            }
-            row.add(edgeTransportAmounts.get(edg));
-            row.add(0);
-            row.add(graphEdgeLengths.get(edg));
-            for (int i = 0; i < 3; i++) {
-                row.add(0);
-            }
+                EsriPolyline edge = new EsriPolyline(routeLatLon, OMGraphic.DECIMAL_DEGREES, OMGraphic.LINETYPE_STRAIGHT);
+                edgeList.add(edge);
 
-            edgeAttributeTable.addRecord(row);
+                // Add attributes.
+                ArrayList<Object> row = new ArrayList<>();
+                row.add(String.valueOf(arcId));                                   // Id(str): unique edge identifier (matches global bidirectional arc index)
+                row.add((double) arcId);                                           // Id(num): unique edge identifier (matches global bidirectional arc index)
+                row.add(edgeTransportAmounts.getOrDefault(edg, 0.0));             // Flow|Mt/y: actual CO2 flow (MtCO2/yr)
+                row.add(soln.getEdgeCosts().getOrDefault(edg, 0.0));              // Cost|$M/y: total annual edge cost ($M/yr)
+                row.add(graphEdgeLengths.getOrDefault(edg, 0.0));                 // Length|km: edge length in km
+                row.add(data.getGraphEdgeConstructionCosts().getOrDefault(edg, 0.0)); // ConCost|-: construction cost converted to appropriate units
+                row.add(edgeTransportAmounts.getOrDefault(edg, 0.0) > 0 ? soln.getEdgeCosts().getOrDefault(edg, 0.0) / edgeTransportAmounts.get(edg) : 0.0);  // Levl|$/t: levelized cost per ton
+
+                edgeAttributeTable.addRecord(row);
+            }
+            arcId++;  // Increment for ALL edges, whether opened or not
         }
 
         EsriShapeExport writeEdgeShapefiles = new EsriShapeExport(edgeList, edgeAttributeTable, newDir.toString() + "/Network");
@@ -1018,18 +1078,32 @@ public class DataInOut {
         Source[] sources = data.getSources();
         Sink[] sinks = data.getSinks();
         HashMap<Edge, int[]> graphEdgeRoutes = data.getGraphEdgeRoutes();
+        HashMap<Edge, Double> graphEdgeLengths = data.getGraphEdgeLengths();
+        HashMap<Edge, Double> graphEdgeConstructionCosts = data.getGraphEdgeConstructionCosts();
+
+        // Create index maps for sources and sinks.
+        HashMap<Source, Integer> sourceIndex = new HashMap<>();
+        for (int i = 0; i < sources.length; i++) {
+            sourceIndex.put(sources[i], i);
+        }
+        HashMap<Sink, Integer> sinkIndex = new HashMap<>();
+        for (int i = 0; i < sinks.length; i++) {
+            sinkIndex.put(sinks[i], i);
+        }
 
         // Make source shapefiles.
         EsriPointList sourceList = new EsriPointList();
-        String[] sourceAttributeNames = {"Id", "X", "Y"};
-        int[] sourceAttributeDecimals = {0, 6, 6};
-        DbfTableModel sourceAttributeTable = new DbfTableModel(sourceAttributeNames.length);   //12
+        String[] sourceAttributeNames = {"Id", "Idx", "X", "Y", "Supp|Mt/y", "FixCap|$M", "FixOM|$M/y", "VarOM|$/t", "Cell#"};
+        int[] sourceAttributeDecimals = {0, 0, 6, 6, 6, 6, 6, 2, 0};
+        DbfTableModel sourceAttributeTable = new DbfTableModel(sourceAttributeNames.length);
         for (int colNum = 0; colNum < sourceAttributeNames.length; colNum++) {
+            sourceAttributeTable.setLength(colNum, 10);
             sourceAttributeTable.setColumnName(colNum, sourceAttributeNames[colNum]);
             sourceAttributeTable.setDecimalCount(colNum, (byte) sourceAttributeDecimals[colNum]);
-            sourceAttributeTable.setLength(colNum, 10);
             if (sourceAttributeNames[colNum].equals("Id")) {
                 sourceAttributeTable.setType(colNum, DbfTableModel.TYPE_CHARACTER);
+            } else if (sourceAttributeDecimals[colNum] == 0) {
+                sourceAttributeTable.setType(colNum, DbfTableModel.TYPE_LONG);
             } else {
                 sourceAttributeTable.setType(colNum, DbfTableModel.TYPE_NUMERIC);
             }
@@ -1050,10 +1124,16 @@ public class DataInOut {
                 sourceList.add(source);
 
                 // Add attributes.
-                ArrayList row = new ArrayList();
+                ArrayList<Object> row = new ArrayList<>();
                 row.add(src.getLabel());
+                row.add((double) sourceIndex.get(src).intValue());  // Idx: original index from sources.csv
                 row.add(data.cellToLatLon(src.getCellNum())[1]);
                 row.add(data.cellToLatLon(src.getCellNum())[0]);
+                row.add(src.getProductionRate());  // MxSpply
+                row.add(src.getFixedCapCost());  // FixedCapCst (fixed capital cost only)
+                row.add(src.getOMCost());  // FixedOMCst (fixed O&M cost)
+                row.add(src.getCaptureCost());  // VarOMCst (variable O&M cost per unit)
+                row.add((double) src.getCellNum());  // Cell#
 
                 sourceAttributeTable.addRecord(row);
             }
@@ -1065,15 +1145,17 @@ public class DataInOut {
 
         // Make sink shapefiles.
         EsriPointList sinkList = new EsriPointList();
-        String[] sinkAttributeNames = {"Id", "X", "Y"};
-        int[] sinkAttributeDecimals = {0, 6, 6};
-        DbfTableModel sinkAttributeTable = new DbfTableModel(sinkAttributeNames.length);   //12
+        String[] sinkAttributeNames = {"Id", "Idx", "X", "Y", "MaxStg|Mt", "FixCap|$M", "FixOM|$M/y", "Well|Mt/y", "WCap|$M", "WOM|$M/y", "VarOM|$/t", "Cell#"};
+        int[] sinkAttributeDecimals = {0, 0, 6, 6, 6, 6, 6, 6, 6, 6, 2, 0};
+        DbfTableModel sinkAttributeTable = new DbfTableModel(sinkAttributeNames.length);
         for (int colNum = 0; colNum < sinkAttributeNames.length; colNum++) {
+            sinkAttributeTable.setLength(colNum, 10);
             sinkAttributeTable.setColumnName(colNum, sinkAttributeNames[colNum]);
             sinkAttributeTable.setDecimalCount(colNum, (byte) sinkAttributeDecimals[colNum]);
-            sinkAttributeTable.setLength(colNum, 10);
             if (sinkAttributeNames[colNum].equals("Id")) {
                 sinkAttributeTable.setType(colNum, DbfTableModel.TYPE_CHARACTER);
+            } else if (sinkAttributeDecimals[colNum] == 0) {
+                sinkAttributeTable.setType(colNum, DbfTableModel.TYPE_LONG);
             } else {
                 sinkAttributeTable.setType(colNum, DbfTableModel.TYPE_NUMERIC);
             }
@@ -1094,10 +1176,19 @@ public class DataInOut {
                 sinkList.add(source);
 
                 // Add attributes.
-                ArrayList row = new ArrayList();
+                ArrayList<Object> row = new ArrayList<>();
                 row.add(snk.getLabel());
+                row.add((double) sinkIndex.get(snk).intValue());  // Idx: original index from sinks.csv
                 row.add(data.cellToLatLon(snk.getCellNum())[1]);
                 row.add(data.cellToLatLon(snk.getCellNum())[0]);
+                row.add(snk.getCapacity());  // MxStrg
+                row.add(snk.getFixedCapCost());  // FixedCapCst (site-wide fixed capital cost)
+                row.add(snk.getOMCost());  // FixedOMCst (site-wide fixed O&M cost)
+                row.add(snk.getWellCapacity());  // WellCap
+                row.add(snk.getWellFixedCapCost());  // WellCapCst (well fixed capital cost)
+                row.add(snk.getWellOMCost());  // WellOMCst (well fixed O&M cost)
+                row.add(snk.getInjectionCost());  // VarOMCst (variable injection O&M cost per unit)
+                row.add((double) snk.getCellNum());  // Cell#
 
                 sinkAttributeTable.addRecord(row);
             }
@@ -1109,20 +1200,35 @@ public class DataInOut {
 
         // Make network shapefiles.
         EsriPolylineList edgeList = new EsriPolylineList();
-        String[] edgeAttributeNames = {"Id"};
-        int[] edgeAttributeDecimals = {0};
-        DbfTableModel edgeAttributeTable = new DbfTableModel(edgeAttributeNames.length);   //12
+        String[] edgeAttributeNames = {"Id", "LengKM", "ConCost", "V1Idx", "V1Lat", "V1Lon", "V2Idx", "V2Lat", "V2Lon"};
+        int[] edgeAttributeDecimals = {0, 3, 6, 0, 6, 6, 0, 6, 6};
+        DbfTableModel edgeAttributeTable = new DbfTableModel(edgeAttributeNames.length);
         for (int colNum = 0; colNum < edgeAttributeNames.length; colNum++) {
+            edgeAttributeTable.setLength(colNum, 15);
             edgeAttributeTable.setColumnName(colNum, edgeAttributeNames[colNum]);
             edgeAttributeTable.setDecimalCount(colNum, (byte) edgeAttributeDecimals[colNum]);
-            edgeAttributeTable.setLength(colNum, 10);
             if (edgeAttributeNames[colNum].equals("Id")) {
                 edgeAttributeTable.setType(colNum, DbfTableModel.TYPE_CHARACTER);
+            } else if (edgeAttributeDecimals[colNum] == 0) {
+                edgeAttributeTable.setType(colNum, DbfTableModel.TYPE_LONG);
             } else {
                 edgeAttributeTable.setType(colNum, DbfTableModel.TYPE_NUMERIC);
             }
         }
-        for (Edge edg : graphEdgeRoutes.keySet()) {
+        
+        // Sort edges deterministically to match MPSWriter indexing
+        ArrayList<Edge> sortedEdges = new ArrayList<>(graphEdgeRoutes.keySet());
+        sortedEdges.sort((e1, e2) -> {
+            int min1 = Math.min(e1.v1, e1.v2);
+            int max1 = Math.max(e1.v1, e1.v2);
+            int min2 = Math.min(e2.v1, e2.v2);
+            int max2 = Math.max(e2.v1, e2.v2);
+            if (min1 != min2) return Integer.compare(min1, min2);
+            return Integer.compare(max1, max2);
+        });
+        
+        int arcId = 0;
+        for (Edge edg : sortedEdges) {
             // Build route
             int[] route = graphEdgeRoutes.get(edg);
             double[] routeLatLon = new double[route.length * 2];    // Route cells translated into: lat, lon, lat, lon,...
@@ -1136,11 +1242,18 @@ public class DataInOut {
             edgeList.add(edge);
 
             // Add attributes.
-            ArrayList row = new ArrayList();
-            for (int i = 0; i < 1; i++) {
-                row.add(0);
-            }
+            ArrayList<Object> row = new ArrayList<>();
+            row.add(String.valueOf(arcId));  // Id: edge index corresponding to y[i] variables in MPS model
+            row.add(graphEdgeLengths.getOrDefault(edg, 0.0));  // LengKM: edge length in kilometers
+            row.add(graphEdgeConstructionCosts.getOrDefault(edg, 0.0));  // ConCost: construction cost parameter
+            row.add((double) edg.v1);  // V1Idx: vertex 1 index
+            row.add(data.cellToLatLon(edg.v1)[1]);  // V1Lat: vertex 1 latitude
+            row.add(data.cellToLatLon(edg.v1)[0]);  // V1Lon: vertex 1 longitude
+            row.add((double) edg.v2);  // V2Idx: vertex 2 index
+            row.add(data.cellToLatLon(edg.v2)[1]);  // V2Lat: vertex 2 latitude
+            row.add(data.cellToLatLon(edg.v2)[0]);  // V2Lon: vertex 2 longitude
             edgeAttributeTable.addRecord(row);
+            arcId++;
         }
 
         EsriShapeExport writeEdgeShapefiles = new EsriShapeExport(edgeList, edgeAttributeTable, newDir.toString() + "/Network");
@@ -1272,7 +1385,7 @@ public class DataInOut {
         HttpURLConnection connection;
 
         try {
-            URL url = new URL(urlPath);
+            URL url = URI.create(urlPath).toURL();
             connection = (HttpURLConnection) url.openConnection();
 
             DateFormat dateFormat = new SimpleDateFormat("ddMMyyy-HHmmssss");

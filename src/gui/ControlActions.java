@@ -29,8 +29,8 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+// import java.util.logging.Level;
+// import java.util.logging.Logger;
 import javafx.collections.FXCollections;
 import javafx.embed.swing.SwingFXUtils;
 import javafx.scene.control.ChoiceBox;
@@ -140,7 +140,7 @@ public class ControlActions {
         return SwingFXUtils.toFXImage(image, null);
     }
 
-    public void selectDataset(File datasetPath, ChoiceBox scenarioChoice) {
+    public void selectDataset(File datasetPath, ChoiceBox<String> scenarioChoice) {
         // Clear GUI
         gui.fullReset();
 
@@ -158,7 +158,7 @@ public class ControlActions {
         scenarioChoice.setItems(FXCollections.observableArrayList(dirs));
     }
 
-    public void initializeDatasetSelection(ChoiceBox datasetChoice) {
+    public void initializeDatasetSelection(ChoiceBox<String> datasetChoice) {
         // Set initial datasets.
         File f = new File(basePath);
         ArrayList<String> dirs = new ArrayList<>();
@@ -170,7 +170,7 @@ public class ControlActions {
         datasetChoice.setItems(FXCollections.observableArrayList(dirs));
     }
 
-    public void selectScenario(String scenario, Rectangle background, ChoiceBox solutionChoice) {
+    public void selectScenario(String scenario, Rectangle background, ChoiceBox<String> solutionChoice) {
         if (scenario != null) {
             gui.softReset();
             this.scenario = scenario;
@@ -294,22 +294,18 @@ public class ControlActions {
     public void runCPLEX() {
         // Check if CPLEX exists.
         try {
-            Runtime r = Runtime.getRuntime();
-            r.exec("cplex");
+            new ProcessBuilder("cplex").start();
 
             // Determine model version
             String mipPath = basePath + "/" + dataset + "/Scenarios/" + scenario + "/MIP/";
-            String modelVersion = "";
             String run = "";
             String mpsFileName = "";
             for (File f : new File(mipPath).listFiles()) {
                 if (f.getName().endsWith(".mps")) {
                     if (f.getName().startsWith("cap")) {
-                        modelVersion = "c";
                         run = "cap";
                         mpsFileName = "cap.mps";
                     } else if (f.getName().startsWith("price")) {
-                        modelVersion = "p";
                         run = "price";
                         mpsFileName = "price.mps";
                     }
@@ -373,12 +369,12 @@ public class ControlActions {
                     String[] args = new String[]{"/usr/bin/open", "-a", "Terminal", solutionDirectory.getAbsolutePath() + "/osCommands.sh"};
                     ProcessBuilder pb = new ProcessBuilder(args);
                     pb.directory(solutionDirectory);
-                    Process p = pb.start();
+                    pb.start();
                 } else if (os.toLowerCase().contains("windows")) {
                     String[] args = new String[]{"cmd.exe", "/C", "start", solutionDirectory.getAbsolutePath() + "/osCommands.bat"};
                     ProcessBuilder pb = new ProcessBuilder(args);
                     pb.directory(solutionDirectory);
-                    Process p = pb.start();
+                    pb.start();
                 }
             } catch (IOException e) {
             }
@@ -435,7 +431,7 @@ public class ControlActions {
         }
     }
 
-    public void initializeSolutionSelection(ChoiceBox runChoice) {
+    public void initializeSolutionSelection(ChoiceBox<String> runChoice) {
         if (basePath != "" && dataset != "" && scenario != "") {
             // Set initial datasets.
             File f = new File(basePath + "/" + dataset + "/Scenarios/" + scenario + "/Results");
@@ -685,7 +681,7 @@ public class ControlActions {
             edgeList.add(edge);
 
             // Add attributes.
-            ArrayList row = new ArrayList();
+            ArrayList<Object> row = new ArrayList<>();
             for (int i = 0; i < 3; i++) {
                 row.add(0);
             }

@@ -70,7 +70,7 @@ class SceneGestures {
     NetworkDisplay canvas;
 
     private ArrayList<Pane> entitiesToResize = new ArrayList<>();
-    private double radius = 5;
+    // private double radius = 5;
     private double fontSize = 13;
 
     public SceneGestures(NetworkDisplay canvas) {
